@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/client-sns": "^3.1173.0",
     "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "@aws-sdk/util-dynamodb": "^3.996.9",
     "zod": "^3.23.8"
   },
   "devDependencies": {

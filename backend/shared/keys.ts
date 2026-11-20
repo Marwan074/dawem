@@ -3,13 +3,32 @@
 export const keys = {
   user: (userId: string) => ({ PK: `USER#${userId}`, SK: "PROFILE" }),
   goal: (userId: string, goalId: string) => ({ PK: `USER#${userId}`, SK: `GOAL#${goalId}` }),
-  task: (goalId: string, date: string) => ({ PK: `GOAL#${goalId}`, SK: `TASK#${date}` }),
-  completion: (userId: string, taskId: string) => ({ PK: `USER#${userId}`, SK: `COMPLETION#${taskId}` }),
+  // taskId looks like "2026-11-20-a1b2c3d4": the date prefix lets us query a day's tasks.
+  task: (goalId: string, taskId: string) => ({ PK: `GOAL#${goalId}`, SK: `TASK#${taskId}` }),
+  completion: (userId: string, goalId: string, taskId: string) => ({
+    PK: `USER#${userId}`,
+    SK: `COMPLETION#${goalId}#${taskId}`,
+  }),
   streak: (userId: string) => ({ PK: `USER#${userId}`, SK: "STREAK" }),
   xp: (userId: string) => ({ PK: `USER#${userId}`, SK: "XP" }),
   xpLedger: (userId: string, eventKey: string) => ({ PK: `USER#${userId}`, SK: `XPLEDGER#${eventKey}` }),
   userBadge: (userId: string, badgeId: string) => ({ PK: `USER#${userId}`, SK: `BADGE#${badgeId}` }),
   device: (userId: string, deviceId: string) => ({ PK: `USER#${userId}`, SK: `DEVICE#${deviceId}` }),
+  challenge: (challengeId: string) => ({ PK: `CHALLENGE#${challengeId}`, SK: "META" }),
+  challengeMember: (challengeId: string, userId: string) => ({
+    PK: `CHALLENGE#${challengeId}`,
+    SK: `MEMBER#${userId}`,
+  }),
+  // Pointer on the user's side so the stream consumer can find a user's challenges.
+  userChallenge: (userId: string, challengeId: string) => ({
+    PK: `USER#${userId}`,
+    SK: `CHALLENGE#${challengeId}`,
+  }),
+  // One marker per (completion, challenge): makes stream retries idempotent.
+  challengeProgress: (userId: string, challengeId: string, goalId: string, taskId: string) => ({
+    PK: `USER#${userId}`,
+    SK: `CPROG#${challengeId}#${goalId}#${taskId}`,
+  }),
 };
 
 export const TABLE_NAME = () => {
