@@ -19,9 +19,13 @@ export function xpFor(event: XpEvent): number {
   return XP_RULES[event];
 }
 
-/** Level n requires 100 * n * (n - 1) / 2 total XP: 0, 100, 300, 600, ... */
+/** Total XP needed to reach `level`: 100 * level * (level - 1) / 2 => 0, 100, 300, 600, ... */
+export function xpThreshold(level: number): number {
+  return (100 * level * (level - 1)) / 2;
+}
+
 export function levelForXp(totalXp: number): number {
   let level = 1;
-  while (totalXp >= (100 * (level + 1) * level) / 2) level++;
+  while (totalXp >= xpThreshold(level + 1)) level++;
   return level;
 }
