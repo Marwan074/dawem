@@ -16,6 +16,7 @@ import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations
 import { HttpUserPoolAuthorizer } from "aws-cdk-lib/aws-apigatewayv2-authorizers";
 import * as cw from "aws-cdk-lib/aws-cloudwatch";
 import * as logs from "aws-cdk-lib/aws-logs";
+import { StreaklyObservability } from "./observability";
 
 export interface StreaklyStackProps extends cdk.StackProps {
   stage: string;
@@ -31,6 +32,12 @@ export class StreaklyStack extends cdk.Stack {
     //   cdk deploy -c platformApplicationArn=arn:aws:sns:REGION:ACCOUNT:app/GCM/streakly
     // Without it the API still works; devices are stored but push is disabled.
     const platformAppArn: string | undefined = this.node.tryGetContext("platformApplicationArn");
+    const allowedOrigin: string = this.node.tryGetContext("allowedOrigin") ?? "*";
+    const alertEmail: string | undefined = this.node.tryGetContext("alertEmail");
+
+    cdk.Tags.of(this).add("Project", "Streakly");
+    cdk.Tags.of(this).add("Stage", props.stage);
+    cdk.Tags.of(this).add("ManagedBy", "AWS-CDK");
 
     // ---- Identity ----
     const userPool = new cognito.UserPool(this, "UserPool", {
@@ -70,7 +77,7 @@ export class StreaklyStack extends cdk.Stack {
       cors: [
         {
           allowedMethods: [s3.HttpMethods.PUT],
-          allowedOrigins: ["*"], // tighten to app origins before prod
+          allowedOrigins: [allowedOrigin],
           allowedHeaders: ["*"],
         },
       ],
@@ -87,6 +94,7 @@ export class StreaklyStack extends cdk.Stack {
         runtime: lambda.Runtime.NODEJS_24_X,
         memorySize: 256,
         timeout: cdk.Duration.seconds(10),
+        tracing: lambda.Tracing.ACTIVE,
         environment: { TABLE_NAME: table.tableName, PLATFORM_APP_ARN: platformAppArn ?? "" },
         projectRoot: backendRoot,
         depsLockFilePath: path.join(backendRoot, "package-lock.json"),
@@ -166,6 +174,7 @@ export class StreaklyStack extends cdk.Stack {
     // ---- Streams: badges + challenge progress ----
     const streamDlq = new sqs.Queue(this, "StreamDlq", {
       retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
       removalPolicy: removal,
     });
     streamConsumer.addEventSource(
@@ -196,8 +205,13 @@ export class StreaklyStack extends cdk.Stack {
     const api = new apigw.HttpApi(this, "Api", {
       apiName: `streakly-${props.stage}`,
       corsPreflight: {
-        allowOrigins: ["*"], // tighten for prod
-        allowMethods: [apigw.CorsHttpMethod.ANY],
+        allowOrigins: [allowedOrigin],
+        allowMethods: [
+          apigw.CorsHttpMethod.GET,
+          apigw.CorsHttpMethod.POST,
+          apigw.CorsHttpMethod.PUT,
+          apigw.CorsHttpMethod.DELETE,
+        ],
         allowHeaders: ["authorization", "content-type"],
       },
     });
@@ -230,30 +244,75 @@ export class StreaklyStack extends cdk.Stack {
     route("/devices/{deviceId}", PUT, devicesRegister);
     route("/devices/{deviceId}", DELETE, devicesUnregister);
 
-    // Throttle to produce 429s instead of unbounded cost.
+    // Throttle to produce 429s instead of unbounded cost, and enable access logging.
     const defaultStage = api.defaultStage?.node.defaultChild as apigw.CfnStage | undefined;
     if (defaultStage) {
       defaultStage.defaultRouteSettings = { throttlingBurstLimit: 50, throttlingRateLimit: 25 };
+      const apiAccessLogs = new logs.LogGroup(this, "ApiAccessLogs", {
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: removal,
+      });
+      defaultStage.accessLogSettings = {
+        destinationArn: apiAccessLogs.logGroupArn,
+        format: JSON.stringify({
+          requestId: "$context.requestId",
+          ip: "$context.identity.sourceIp",
+          method: "$context.httpMethod",
+          path: "$context.path",
+          status: "$context.status",
+          latency: "$context.responseLatency",
+          error: "$context.error.message",
+        }),
+      };
     }
 
     // ---- Observability ----
-    new cw.Alarm(this, "CompleteErrors", {
+    const completeErrorsAlarm = new cw.Alarm(this, "CompleteErrors", {
       metric: tasksComplete.metricErrors({ period: cdk.Duration.minutes(5) }),
       threshold: 3,
       evaluationPeriods: 1,
       alarmDescription: "Task completion Lambda is erroring",
     });
-    new cw.Alarm(this, "StreamDlqNotEmpty", {
+    const streamDlqAlarm = new cw.Alarm(this, "StreamDlqNotEmpty", {
       metric: streamDlq.metricApproximateNumberOfMessagesVisible({ period: cdk.Duration.minutes(5) }),
       threshold: 1,
       evaluationPeriods: 1,
       alarmDescription: "Badge / challenge records failed repeatedly and landed in the DLQ",
     });
-    new cw.Alarm(this, "ReminderErrors", {
+    const reminderErrorsAlarm = new cw.Alarm(this, "ReminderErrors", {
       metric: reminders.metricErrors({ period: cdk.Duration.minutes(15) }),
       threshold: 1,
       evaluationPeriods: 2,
       alarmDescription: "Reminder sweep is failing",
+    });
+
+    new StreaklyObservability(this, "Observability", {
+      stage: props.stage,
+      api,
+      table,
+      streamDlq,
+      functions: [
+        profileGet,
+        profilePut,
+        goalsCreate,
+        goalsList,
+        goalsGet,
+        tasksCreate,
+        tasksComplete,
+        readToday,
+        readStreak,
+        readXp,
+        readBadges,
+        challengesCreate,
+        challengesJoin,
+        challengesList,
+        devicesRegister,
+        devicesUnregister,
+        streamConsumer,
+        reminders,
+      ],
+      alarms: [completeErrorsAlarm, streamDlqAlarm, reminderErrorsAlarm],
+      alertEmail,
     });
 
     // ---- Outputs ----
