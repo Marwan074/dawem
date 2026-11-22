@@ -1,0 +1,121 @@
+name: Infrastructure CI/CD
+
+on:
+  push:
+    branches: [main, feature/devops-infra]
+    paths:
+      - "infrastructure/**"
+      - "backend/**"
+      - ".github/workflows/infrastructure-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "infrastructure/**"
+      - "backend/**"
+      - ".github/workflows/infrastructure-ci.yml"
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy stack to AWS?"
+        type: boolean
+        default: false
+      stage:
+        description: "Target stage (dev or prod)"
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      allowedOrigin:
+        description: "CORS allowed origin (default * for dev, set your domain for prod)"
+        type: string
+        default: "*"
+      alertEmail:
+        description: "Email for CloudWatch alarm notifications (leave empty to skip)"
+        type: string
+        default: ""
+
+jobs:
+  validate:
+    name: Typecheck, Test & Synth
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: |
+            backend/package-lock.json
+            infrastructure/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Install infrastructure dependencies
+        working-directory: infrastructure
+        run: npm ci
+
+      - name: Run TypeScript typecheck
+        working-directory: infrastructure
+        run: npm run typecheck
+
+      - name: Run CDK unit tests
+        working-directory: infrastructure
+        run: npm test
+
+      - name: Synthesize CloudFormation template
+        working-directory: infrastructure
+        run: npx cdk synth --quiet
+
+  deploy:
+    name: Deploy to AWS
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: |
+            backend/package-lock.json
+            infrastructure/package-lock.json
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsDeployRole
+          aws-region: eu-north-1
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Install infrastructure dependencies
+        working-directory: infrastructure
+        run: npm ci
+
+      - name: Deploy CDK Stack
+        working-directory: infrastructure
+        env:
+          STAGE: ${{ inputs.stage }}
+          ALLOWED_ORIGIN: ${{ inputs.allowedOrigin }}
+          ALERT_EMAIL: ${{ inputs.alertEmail }}
+        run: |
+          ARGS=(-c "stage=$STAGE" -c "allowedOrigin=$ALLOWED_ORIGIN")
+          if [ -n "$ALERT_EMAIL" ]; then
+            ARGS+=(-c "alertEmail=$ALERT_EMAIL")
+          fi
+          npx cdk deploy --all --require-approval never "${ARGS[@]}"
